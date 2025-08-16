@@ -1,0 +1,27 @@
+# Directories
+__pycache__/
+.ipynb_checkpoints/
+run_out/
+INPUT/
+
+# Files
+*.pyc
+*.pyo
+*.wav
+*.mp4
+*.mp3
+*.ogg
+*.avi
+temp_script.py
+
+# Model weights
+*.pt
+
+# Environment
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
