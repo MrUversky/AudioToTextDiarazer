@@ -28,10 +28,34 @@ ASR_BEAM_SIZE         = 1                    # 1 = быстро, низкая п
 HF_TOKEN = os.environ.get("HF_TOKEN", "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")
 # ---------------------------------
 
-# Папки
+# Папки и кэширование
 OUT_ROOT = Path(OUT_ROOT); OUT_ROOT.mkdir(parents=True, exist_ok=True)
 OUT_ASR  = OUT_ROOT/"asr";  OUT_ASR.mkdir(parents=True, exist_ok=True)
 OUT_DIR  = OUT_ROOT/"final";OUT_DIR.mkdir(parents=True, exist_ok=True)
+CACHE_DIR = OUT_ROOT/"cache"; CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Функция для проверки наличия кэшированных данных
+def get_cached_result(audio_file, step_name):
+    """Получение кэшированных результатов, если они существуют"""
+    cache_file = CACHE_DIR / f"{Path(audio_file).stem}_{step_name}.json"
+    if cache_file.exists():
+        print(f"[CACHE] Используются кэшированные данные для {step_name}")
+        try:
+            with open(cache_file, "r", encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[CACHE] Ошибка чтения кэша: {e}")
+    return None
+
+def save_cache(audio_file, step_name, data):
+    """Сохранение результатов в кэш"""
+    cache_file = CACHE_DIR / f"{Path(audio_file).stem}_{step_name}.json"
+    try:
+        with open(cache_file, "w", encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"[CACHE] Сохранены данные для {step_name}")
+    except Exception as e:
+        print(f"[CACHE] Ошибка сохранения кэша: {e}")
 
 def pip_install(pkgs):
     cmd = [sys.executable, "-m", "pip", "install", "-q", "-U", *pkgs]
@@ -51,23 +75,53 @@ def to_hhmmss(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{int(round(s)):02d}"
 
 def extract_wav(input_media: str, start_min, end_min) -> str:
-    input_path = Path(input_media)
-    assert input_path.exists(), f"Нет файла: {input_media}"
-    out_wav = str(OUT_ROOT / "audio_16k_mono.wav")
-    args = ["ffmpeg","-hide_banner","-y","-i", str(input_path)]
-    if start_min is not None:
-        args += ["-ss", to_hhmmss(float(start_min)*60)]
-    if end_min is not None:
+    try:
+        input_path = Path(input_media)
+        if not input_path.exists():
+            raise FileNotFoundError(f"Нет файла: {input_media}")
+            
+        out_wav = str(OUT_ROOT / "audio_16k_mono.wav")
+        args = ["ffmpeg","-hide_banner","-y","-i", str(input_path)]
+        
         if start_min is not None:
-            dur = max(0.0, (float(end_min)-float(start_min))*60)
-        else:
-            dur = max(0.0, float(end_min)*60)
-        args += ["-t", f"{dur:.3f}"]
-    args += ["-vn","-ac","1","-ar","16000","-c:a","pcm_s16le", out_wav]
-    print("[FFMPEG]", " ".join(shlex.quote(a) for a in args))
-    subprocess.run(args, check=True)
-    assert Path(out_wav).exists() and Path(out_wav).stat().st_size>0, "Ошибка извлечения WAV"
-    return out_wav
+            args += ["-ss", to_hhmmss(float(start_min)*60)]
+        if end_min is not None:
+            if start_min is not None:
+                dur = max(0.0, (float(end_min)-float(start_min))*60)
+            else:
+                dur = max(0.0, float(end_min)*60)
+            args += ["-t", f"{dur:.3f}"]
+        
+        args += ["-vn","-ac","1","-ar","16000","-c:a","pcm_s16le", out_wav]
+        print("[FFMPEG]", " ".join(shlex.quote(a) for a in args))
+        
+        # Выполнение команды с перенаправлением stderr для возможной диагностики
+        process = subprocess.run(args, check=False, stderr=subprocess.PIPE, text=True)
+        
+        if process.returncode != 0:
+            error_msg = process.stderr.strip()
+            print(f"[FFMPEG ERROR] {error_msg}")
+            if "No such file or directory" in error_msg:
+                raise FileNotFoundError(f"FFMPEG не может найти файл: {input_media}")
+            elif "Invalid data found" in error_msg:
+                raise ValueError(f"FFMPEG не может обработать файл: возможно, поврежден или неподдерживаемый формат")
+            else:
+                raise RuntimeError(f"FFMPEG ошибка (код {process.returncode}): {error_msg[:200]}...")
+                
+        if not Path(out_wav).exists() or Path(out_wav).stat().st_size == 0:
+            raise RuntimeError("WAV файл не был создан или пустой")
+            
+        return out_wav
+    
+    except FileNotFoundError as e:
+        print(f"[ERROR] {e}")
+        raise
+    except ValueError as e:
+        print(f"[ERROR] {e}")
+        raise
+    except Exception as e:
+        print(f"[ERROR] Ошибка при извлечении аудио: {e}")
+        raise
 
 AUDIO = extract_wav(INPUT_MEDIA, START_MIN, END_MIN)
 print("AUDIO:", AUDIO)
@@ -81,6 +135,12 @@ def fmt_ts(t: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 def run_asr(audio_path: str, out_dir: Path, lang: str):
+    # Проверяем наличие кэшированных результатов
+    cached_result = get_cached_result(audio_path, "asr")
+    if cached_result:
+        print("[ASR] Используем кэшированный результат распознавания")
+        return cached_result
+        
     from faster_whisper import WhisperModel
     import torch
 
@@ -117,24 +177,38 @@ def run_asr(audio_path: str, out_dir: Path, lang: str):
     print("[ASR] transcribing…")
     i=0
     with open(srt_path, "w", encoding="utf-8") as S:
-        segments, info = model.transcribe(
-            audio_path,
-            language=lang,
-            vad_filter=False,             # оставляем False, чтобы не тянуть torch-силеро
-            beam_size=ASR_BEAM_SIZE,
-            chunk_length=ASR_CHUNK_LEN_SEC,
-            word_timestamps=False
-        )
-        for seg in segments:
-            i += 1
-            res["segments"].append({"start": seg.start, "end": seg.end, "text": seg.text})
-            S.write(f"{i}\n{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}\n{seg.text.strip()}\n\n")
-            if i % 20 == 0:
-                print(f"[ASR] {i} segments…")
+        try:
+            segments, info = model.transcribe(
+                audio_path,
+                language=lang,
+                vad_filter=False,             # оставляем False, чтобы не тянуть torch-силеро
+                beam_size=ASR_BEAM_SIZE,
+                chunk_length=ASR_CHUNK_LEN_SEC,
+                word_timestamps=False
+            )
+            for seg in segments:
+                i += 1
+                res["segments"].append({"start": seg.start, "end": seg.end, "text": seg.text})
+                S.write(f"{i}\n{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}\n{seg.text.strip()}\n\n")
+                if i % 20 == 0:
+                    print(f"[ASR] {i} segments…")
+                    
+                # Регулярно освобождаем память
+                if i % 100 == 0:
+                    gc.collect()
+                    if device=="cuda":
+                        torch.cuda.empty_cache()
+        except Exception as e:
+            print(f"[ASR ERROR] Ошибка при распознавании: {e}")
+            raise
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(res, f, ensure_ascii=False, indent=2)
 
+    # Сохраняем в кэш
+    save_cache(audio_path, "asr", res)
+
+    # Очищаем память
     if device=="cuda":
         torch.cuda.empty_cache()
     gc.collect()
@@ -179,16 +253,20 @@ else:
 
     def diarize_with_pyannote(aligned_obj):
         from whisperx.diarize import DiarizationPipeline, assign_word_speakers
-        assert HF_TOKEN.startswith("hf_") and HF_TOKEN.isascii(), (
-            "HF_TOKEN пуст/не ASCII. Для pyannote нужно принять доступ и задать токен."
-        )
-        print("[DIAR] pyannote (CPU)…")
-        t0=time.time()
-        dia = DiarizationPipeline(use_auth_token=HF_TOKEN, device="cpu")
-        dsegs = dia(AUDIO, min_speakers=NUM_SPEAKERS, max_speakers=NUM_SPEAKERS)
-        out  = assign_word_speakers(dsegs, aligned_obj)
-        print(f"[DIAR] pyannote done in {time.time()-t0:.1f}s")
-        return out
+        try:
+            assert HF_TOKEN.startswith("hf_") and HF_TOKEN.isascii(), (
+                "HF_TOKEN пуст/не ASCII. Для pyannote нужно принять доступ и задать токен."
+            )
+            print("[DIAR] pyannote (CPU)…")
+            t0=time.time()
+            dia = DiarizationPipeline(use_auth_token=HF_TOKEN, device="cpu")
+            dsegs = dia(AUDIO, min_speakers=NUM_SPEAKERS, max_speakers=NUM_SPEAKERS)
+            out  = assign_word_speakers(dsegs, aligned_obj)
+            print(f"[DIAR] pyannote done in {time.time()-t0:.1f}s")
+            return out
+        except Exception as e:
+            print(f"[DIAR ERROR] Ошибка при диаризации с PyAnnote: {e}")
+            raise
 
     def diarize_open_fallback(aligned_or_res):
         print("[DIAR] fallback: Silero+ECAPA+KMeans…")
@@ -248,11 +326,20 @@ else:
             final["segments"].append({**seg,"speaker":spk})
         return final
 
-    try:
-        final = diarize_with_pyannote(aligned)
-    except Exception as e:
-        print(f"[DIAR] pyannote unavailable → {e}\n→ using fallback.")
-        final = diarize_open_fallback(aligned)
+    # Проверяем наличие кэшированной диаризации
+    cached_diar = get_cached_result(AUDIO, "diarization")
+    if cached_diar:
+        print("[DIAR] Используем кэшированный результат диаризации")
+        final = cached_diar
+    else:
+        try:
+            final = diarize_with_pyannote(aligned)
+        except Exception as e:
+            print(f"[DIAR] pyannote unavailable → {e}\n→ using fallback.")
+            final = diarize_open_fallback(aligned)
+        
+        # Сохраняем результат диаризации в кэш
+        save_cache(AUDIO, "diarization", final)
 
     # ---------- Сохранение ----------
     BASE = OUT_DIR/"final"
