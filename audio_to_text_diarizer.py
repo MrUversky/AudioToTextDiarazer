@@ -23,9 +23,11 @@ ASR_COMPUTE_TYPE_GPU  = "int8_float16"       # безопаснее, чем floa
 ASR_CHUNK_LEN_SEC     = 15                   # меньше → стабильнее
 ASR_BEAM_SIZE         = 1                    # 1 = быстро, низкая память
 
-# PyANNOTE токен (для лучшей диаризации). Должен быть того же HF-аккаунта, где приняты условия:
-# https://huggingface.co/pyannote/segmentation-3.0 (кнопка "Access")
-HF_TOKEN = os.environ.get("HF_TOKEN", "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")
+# PyANNOTE токен (для лучшей диаризации). 
+# Получите токен на https://huggingface.co/pyannote/segmentation-3.0 (кнопка "Access")
+# и установите его в окружении перед запуском: export HF_TOKEN="ваш_токен"
+# или укажите в блокноте Colab
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
 # ---------------------------------
 
 # Папки и кэширование
