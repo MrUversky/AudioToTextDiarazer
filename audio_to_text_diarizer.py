@@ -160,11 +160,16 @@ def run_asr(audio_path: str, out_dir: Path, lang: str):
     # Загрузка модели
     t0=time.time()
     try:
-        model = WhisperModel(model_name, device=device, compute_type=compute_type)
+        model = WhisperModel(model_name, device=device, compute_type=compute_type, download_root="./models", local_files_only=False)
     except Exception as e:
         print(f"[ASR] init failed on {device}: {e}\n→ fallback to CPU {ASR_MODEL_CPU}/int8")
-        model = WhisperModel(ASR_MODEL_CPU, device="cpu", compute_type="int8")
-        device="cpu"
+        try:
+            model = WhisperModel(ASR_MODEL_CPU, device="cpu", compute_type="int8", download_root="./models", local_files_only=False)
+            device="cpu"
+        except Exception as e2:
+            print(f"[ASR] critical error: {e2}\n→ trying offline openai/whisper-tiny")
+            model = WhisperModel("openai/whisper-tiny", device="cpu", compute_type="int8", download_root="./models", local_files_only=False)
+            device="cpu"
 
     print(f"[ASR] model loaded in {time.time()-t0:.1f}s")
 
