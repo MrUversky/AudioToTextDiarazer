@@ -227,7 +227,56 @@ def run_asr(audio_path: str, out_dir: Path, lang: str):
 
 res = run_asr(AUDIO, OUT_ASR, LANG)
 
-# Если диаризация не нужна → финализируем тут
+# Функция для проверки пропусков в транскрипции
+def check_for_gaps(segments, min_gap_sec=1.0):
+    gaps = []
+    for i in range(1, len(segments)):
+        prev_end = segments[i-1].get('end', 0)
+        curr_start = segments[i].get('start', 0)
+        gap = curr_start - prev_end
+        if gap > min_gap_sec:
+            gaps.append({
+                'prev_segment': i-1,
+                'next_segment': i,
+                'prev_end': prev_end,
+                'next_start': curr_start,
+                'gap_duration': gap,
+                'prev_text': segments[i-1].get('text', ''),
+                'next_text': segments[i].get('text', '')
+            })
+    return gaps
+
+# Функция для создания текста, сгруппированного по говорящим
+def create_speaker_grouped_text(segments):
+    speakers = {}
+    
+    # Сначала группируем по спикерам
+    for seg in segments:
+        speaker = seg.get('speaker', 'SPEAKER_UNKNOWN')
+        if speaker not in speakers:
+            speakers[speaker] = []
+        speakers[speaker].append({
+            'start': seg.get('start', 0),
+            'end': seg.get('end', 0),
+            'text': seg.get('text', '').strip()
+        })
+    
+    # Сортируем спикеров для консистентного вывода
+    sorted_speakers = sorted(speakers.keys())
+    
+    # Формируем результат
+    result = []
+    for speaker in sorted_speakers:
+        speaker_segments = speakers[speaker]
+        # Сортируем сегменты этого спикера по времени
+        speaker_segments.sort(key=lambda x: x['start'])
+        speaker_text = [seg['text'] for seg in speaker_segments if seg['text'].strip()]
+        if speaker_text:  # Если есть непустые сегменты
+            result.append(f"\n{speaker}\n{' '.join(speaker_text)}\n")
+    
+    return ''.join(result)
+
+# Функция для записи SRT файлов
 def write_srt(segs, path, with_speaker=False):
     with open(path,"w",encoding="utf-8") as f:
         for idx, s in enumerate(segs,1):
@@ -237,11 +286,44 @@ def write_srt(segs, path, with_speaker=False):
             f.write(f"{idx}\n{fmt_ts(s.get('start',0))} --> {fmt_ts(s.get('end',0))}\n{text}\n\n")
 
 if not DIARIZE:
+    # Если диаризация не нужна → финализируем тут
+    
+    # Добавляем дефолтного спикера, чтобы работала группировка
+    for segment in res["segments"]:
+        segment["speaker"] = "SPEAKER_DEFAULT"
+    
     base = OUT_DIR/"final"
+    # Сохраняем JSON с результатами
     with open(str(base)+".json","w",encoding="utf-8") as f: json.dump(res, f, ensure_ascii=False, indent=2)
+    
+    # Сохраняем SRT файлы
     write_srt(res["segments"], str(base)+".srt", False)
     write_srt(res["segments"], str(base)+"_with_speakers.srt", True)
-    print("[DONE] (no diarization) →", OUT_DIR)
+    
+    # Создаем и сохраняем группировку по спикерам
+    grouped_text = create_speaker_grouped_text(res["segments"])
+    with open(str(base)+"_grouped_by_speakers.txt", "w", encoding="utf-8") as f:
+        f.write(grouped_text)
+    
+    # Проверяем на пропуски в транскрипции
+    gaps = check_for_gaps(res["segments"], min_gap_sec=1.0)
+    if gaps:
+        print("\n⚠️ ВНИМАНИЕ: Обнаружены пропуски в транскрипции:")
+        for i, gap in enumerate(gaps):
+            print(f"  Пропуск {i+1}: {gap['gap_duration']:.2f} сек между {fmt_ts(gap['prev_end'])} и {fmt_ts(gap['next_start'])}")
+            print(f"     До: '{gap['prev_text'][:50]}...'")
+            print(f"     После: '{gap['next_text'][:50]}...'")
+        
+        # Сохраняем информацию о пропусках в файл
+        with open(str(base)+"_gaps.json", "w", encoding="utf-8") as f:
+            json.dump({"gaps": gaps}, f, ensure_ascii=False, indent=2)
+    
+    print("\n=== DONE ===")
+    print("ASR  →", OUT_ASR)
+    print("FINAL→", OUT_DIR)
+    for p in [f"{base}.json", f"{base}.srt", f"{base}_with_speakers.srt", f"{base}_grouped_by_speakers.txt"]:
+        print("  -", p)
+        
     raise SystemExit
 else:
     # ---------- ALIGN + DIAR ----------
